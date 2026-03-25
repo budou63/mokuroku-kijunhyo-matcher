@@ -800,26 +800,33 @@ Private Function NormalizeText(ByVal s As String) As String
     t = Replace(t, ChrW(&HA0), "")   ' ノーブレークスペース
 
     '---------------------------------------
-    ' 5) 先に表記統一したい記号を統一
+    ' 5) 業務上の語句ゆれを先に統一
+    '---------------------------------------
+    t = NormalizeBusinessTerms(t)
+    t = NormalizeJapaneseEraRange(t)
+
+    '---------------------------------------
+    ' 6) 先に表記統一したい記号を統一
     '---------------------------------------
     ' 波ダッシュ系
     t = Replace(t, "～", "~")
-    t = Replace(t, "?", "~")
-    t = Replace(t, "?", "~")
-    t = Replace(t, "?", "~")
-    t = Replace(t, "?", "-")
+    t = Replace(t, ChrW(&H301C), "~") ' 〜
+    t = Replace(t, ChrW(&HFF5E), "~") ' ～
+    t = Replace(t, ChrW(&H223C), "~") ' ∼
+    t = Replace(t, ChrW(&H2053), "~") ' ⁓
 
     ' ハイフン・長音・ダッシュ系
     t = Replace(t, "‐", "-")
-    t = Replace(t, "-", "-")
-    t = Replace(t, "?", "-")
-    t = Replace(t, "?", "-")
-    t = Replace(t, "?", "-")
+    t = Replace(t, ChrW(&H2010), "-") ' ‐
+    t = Replace(t, ChrW(&H2011), "-") ' ‑
+    t = Replace(t, ChrW(&H2012), "-") ' ‒
+    t = Replace(t, ChrW(&H2013), "-") ' –
+    t = Replace(t, ChrW(&H2014), "-") ' —
     t = Replace(t, "―", "-")
     t = Replace(t, "－", "-")
     t = Replace(t, "ｰ", "-")
     t = Replace(t, "ー", "-")
-    t = Replace(t, "?", "-")
+    t = Replace(t, ChrW(&H2212), "-") ' −
 
     ' ピリオド・中黒類
     t = Replace(t, "．", ".")
@@ -829,9 +836,9 @@ Private Function NormalizeText(ByVal s As String) As String
 
     ' スラッシュ類
     t = Replace(t, "／", "/")
-    t = Replace(t, "?", "/")
-    t = Replace(t, "?", "/")
-    t = Replace(t, "?", "/")
+    t = Replace(t, ChrW(&HFF0F), "/") ' ／
+    t = Replace(t, ChrW(&H2044), "/") ' ⁄
+    t = Replace(t, ChrW(&H2215), "/") ' ∕
 
     ' バックスラッシュ類
     t = Replace(t, "￥", "\")
@@ -861,7 +868,7 @@ Private Function NormalizeText(ByVal s As String) As String
     t = Replace(t, "』", """")
 
     '---------------------------------------
-    ' 6) 突合上ノイズになりやすい記号を除去
+    ' 7) 突合上ノイズになりやすい記号を除去
     '---------------------------------------
     t = Replace(t, "-", "")
     t = Replace(t, "~", "")
@@ -905,6 +912,92 @@ Private Function NormalizeText(ByVal s As String) As String
 
 End Function
 
+Private Function NormalizeBusinessTerms(ByVal textValue As String) As String
+
+    Dim t As String
+    t = textValue
+
+    ' 「外N件」→「他N件」を限定的に吸収（副作用を避けるため件数付きのみ）
+    t = Replace(t, "外1件", "他1件")
+    t = Replace(t, "外2件", "他2件")
+    t = Replace(t, "外3件", "他3件")
+    t = Replace(t, "外4件", "他4件")
+    t = Replace(t, "外5件", "他5件")
+    t = Replace(t, "外6件", "他6件")
+    t = Replace(t, "外7件", "他7件")
+    t = Replace(t, "外8件", "他8件")
+    t = Replace(t, "外9件", "他9件")
+
+    NormalizeBusinessTerms = t
+
+End Function
+
+Private Function NormalizeJapaneseEraRange(ByVal textValue As String) As String
+
+    Dim t As String
+    t = textValue
+
+    ' 先にレンジ記号を統一（この段階では除去しない）
+    t = Replace(t, "～", "~")
+    t = Replace(t, ChrW(&H301C), "~") ' 〜
+    t = Replace(t, ChrW(&HFF5E), "~") ' ～
+    t = Replace(t, "〜", "~")
+
+    ' 例) R7~8 / r7~8 / R7～8 を R7~R8 へ
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = True
+    re.Pattern = "([rＲ]\s*[0-9０-９]{1,2})\s*~\s*([0-9０-９]{1,2})"
+
+    Dim matches As Object
+    Set matches = re.Execute(t)
+
+    Dim i As Long
+    Dim m As Object
+    Dim firstYear As String
+    Dim secondYear As String
+    Dim replacement As String
+
+    For i = matches.Count - 1 To 0 Step -1
+        Set m = matches.Item(i)
+        firstYear = NormalizeDigitsOnly(m.SubMatches(0))
+        secondYear = NormalizeDigitsOnly(m.SubMatches(1))
+
+        If firstYear <> "" And secondYear <> "" Then
+            replacement = "r" & firstYear & "~r" & secondYear
+            t = Left$(t, m.FirstIndex) & replacement & Mid$(t, m.FirstIndex + m.Length + 1)
+        End If
+    Next i
+
+    NormalizeJapaneseEraRange = t
+
+End Function
+
+Private Function NormalizeDigitsOnly(ByVal textValue As String) As String
+
+    Dim t As String
+    Dim i As Long
+    Dim ch As String
+    Dim resultText As String
+
+    t = textValue
+
+    On Error Resume Next
+    t = StrConv(t, vbNarrow)
+    On Error GoTo 0
+
+    For i = 1 To Len(t)
+        ch = Mid$(t, i, 1)
+        If ch Like "[0-9]" Then
+            resultText = resultText & ch
+        End If
+    Next i
+
+    NormalizeDigitsOnly = resultText
+
+End Function
+
 Private Function GetWorksheetIfExists(ByVal wb As Workbook, ByVal sheetName As String) As Worksheet
 
     On Error Resume Next
@@ -924,4 +1017,3 @@ Private Sub DeleteSheetIfExists(ByVal wb As Workbook, ByVal sheetName As String)
     If Not ws Is Nothing Then ws.Delete
 
 End Sub
-
