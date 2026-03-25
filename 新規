@@ -4,13 +4,10 @@ Option Explicit
 ' 文書管理システム出力 × 基準表 突合メイン
 '=========================================================
 Public Sub 文書管理システム_基準表突合()
-
     Dim wbCSV As Workbook
     Dim wsCSV As Worksheet
-
     Dim fd As FileDialog
     Dim selectedPath As String
-
     Dim wbMaster As Workbook
     Dim wsMaster As Worksheet
 
@@ -18,12 +15,10 @@ Public Sub 文書管理システム_基準表突合()
     Dim csvDataStartRow As Long
     Dim masterHeaderRow As Long
     Dim masterDataStartRow As Long
-
     Dim csvLastRow As Long
     Dim csvLastCol As Long
     Dim masterLastRow As Long
     Dim masterLastCol As Long
-
     Dim outputStartCol As Long
     Dim outputEndCol As Long
 
@@ -31,29 +26,51 @@ Public Sub 文書管理システム_基準表突合()
     Dim colClass3 As Long
     Dim colCsvRetention As Long
     Dim colCsvMediaType As Long
-
     Dim colFolder As Long
     Dim colGuide2 As Long
     Dim colMasterRetention As Long
+    Dim colMasterContinue As Long
     Dim colOutputMasterRetention As Long
-
-    Dim r As Long, c As Long
-    Dim bestRow As Long
-    Dim unmatchParentRow As Long
-    Dim unmatchChildRow As Long
-
-    Dim titleVal As String
-    Dim class3Val As String
-
-    Dim bestScore As Long
-    Dim currentScore As Long
 
     Dim wsUnmatchedParent As Worksheet
     Dim wsUnmatchedChild As Worksheet
     Dim msg As String
 
-    ' 子側で一致に使った行を記録する（True = 使用済み）
+    Dim parentData As Variant
+    Dim masterData As Variant
+    Dim outData As Variant
+
+    Dim parentRows As Long
+    Dim masterRows As Long
+
+    Dim masterNormFolder() As String
+    Dim masterNormGuide2() As String
+    Dim masterMeaningful() As Boolean
     Dim matchedMasterRows() As Boolean
+
+    Dim matchedChildIndex() As Long
+    Dim matchedScore() As Long
+    Dim retentionDiffFlags() As Boolean
+
+    Dim unmatchedParentCount As Long
+    Dim unmatchedChildCount As Long
+    Dim unmatchedParentData() As Variant
+    Dim unmatchedChildData() As Variant
+
+    Dim rIdx As Long, mIdx As Long, c As Long
+    Dim currentScore As Long
+    Dim bestScore As Long
+    Dim bestChildIndex As Long
+
+    Dim titleVal As String
+    Dim class3Val As String
+    Dim nTitle As String
+    Dim nClass3 As String
+    Dim rowReason As String
+
+    Dim csvRetentionRaw As String
+    Dim masterRetentionRaw As String
+    Dim masterContinueRaw As String
 
     Const MATCH_THRESHOLD As Long = 60
     Const COLOR_RETENTION_DIFF As Long = vbYellow
@@ -62,30 +79,22 @@ Public Sub 文書管理システム_基準表突合()
     Application.ScreenUpdating = False
     Application.EnableEvents = False
     Application.DisplayAlerts = False
+    Application.StatusBar = "突合準備中..."
 
     On Error GoTo ErrHandler
 
     Set wbCSV = ThisWorkbook
-
-    '========================
-    ' 親側シート固定（Mokuroku）
-    '========================
     Set wsCSV = GetWorksheetIfExists(wbCSV, "Mokuroku")
     If wsCSV Is Nothing Then
         MsgBox "Mokuroku シートが見つかりません。処理を中止します。", vbExclamation
         GoTo ExitProc
     End If
-
-    ' 誰がどのシートを開いていても、必ずMokurokuを対象化する
     wsCSV.Activate
 
     csvHeaderRow = 1
-    csvDataStartRow = csvHeaderRow + 1
+    csvDataStartRow = 2
     outputStartCol = Columns("DR").Column
 
-    '========================
-    ' 親側（文書管理システム出力）の見出し取得
-    '========================
     colTitle = FindHeaderColumn(wsCSV, csvHeaderRow, "タイトル")
     colClass3 = FindHeaderColumn(wsCSV, csvHeaderRow, "分類名３")
     colCsvRetention = FindHeaderColumn(wsCSV, csvHeaderRow, "保存期間")
@@ -98,38 +107,32 @@ Public Sub 文書管理システム_基準表突合()
 
     csvLastRow = wsCSV.Cells(wsCSV.Rows.Count, colTitle).End(xlUp).Row
     csvLastCol = wsCSV.Cells(csvHeaderRow, wsCSV.Columns.Count).End(xlToLeft).Column
+    If csvLastRow < csvDataStartRow Then
+        MsgBox "Mokuroku のデータ行が見つかりません。", vbExclamation
+        GoTo ExitProc
+    End If
 
-    '========================
-    ' 子側（基準表）ファイル選択
-    '========================
     Set fd = Application.FileDialog(msoFileDialogFilePicker)
     With fd
         .Title = "突合する基準表ファイルを選択してください"
         .Filters.Clear
         .Filters.Add "Excel Files", "*.xlsx; *.xlsm; *.xls"
         .AllowMultiSelect = False
-
         If .Show <> -1 Then
             MsgBox "処理を中止しました。", vbInformation
             GoTo ExitProc
         End If
-
         selectedPath = .SelectedItems(1)
     End With
 
     Set wbMaster = Workbooks.Open(selectedPath, ReadOnly:=True)
-
     On Error Resume Next
     Set wsMaster = wbMaster.Worksheets("基準表")
     On Error GoTo ErrHandler
-
     If wsMaster Is Nothing Then
         Err.Raise vbObjectError + 1002, , "選択したファイルに「基準表」シートが見つかりません。"
     End If
 
-    '========================
-    ' 子側の見出し行を自動検出（1～15行）
-    '========================
     masterHeaderRow = DetectMasterHeaderRow(wsMaster, 1, 15)
     If masterHeaderRow = 0 Then
         Err.Raise vbObjectError + 1010, , _
@@ -138,159 +141,194 @@ Public Sub 文書管理システム_基準表突合()
     End If
     masterDataStartRow = masterHeaderRow + 1
 
-    '========================
-    ' 子側の列取得（見出し名ベース）
-    '========================
     colFolder = FindHeaderColumn(wsMaster, masterHeaderRow, "個別フォルダー")
     colGuide2 = FindHeaderColumn(wsMaster, masterHeaderRow, "第２ガイド")
     colMasterRetention = FindHeaderColumn(wsMaster, masterHeaderRow, "保存期間")
+    colMasterContinue = FindHeaderColumn(wsMaster, masterHeaderRow, "継続")
 
     ValidateHeaderColumn colFolder, "基準表で見出し「個別フォルダー」が見つかりません。", 1003
     ValidateHeaderColumn colGuide2, "基準表で見出し「第２ガイド」が見つかりません。", 1004
     ValidateHeaderColumn colMasterRetention, "基準表で見出し「保存期間」が見つかりません。", 1007
+    ValidateHeaderColumn colMasterContinue, "基準表で見出し「継続」が見つかりません。", 1009
 
     masterLastCol = wsMaster.Cells(masterHeaderRow, wsMaster.Columns.Count).End(xlToLeft).Column
     masterLastRow = GetMasterLastRow(wsMaster, colFolder, colGuide2)
-
     If masterLastRow < masterDataStartRow Then
         Err.Raise vbObjectError + 1011, , "基準表のデータ行が見つかりません。見出し行の直下にデータがあるか確認してください。"
     End If
 
     outputEndCol = outputStartCol + masterLastCol - 1
 
-    '========================
-    ' 出力欄の初期化（内容のみ）
-    '========================
-    wsCSV.Range(wsCSV.Cells(csvHeaderRow, outputStartCol), wsCSV.Cells(wsCSV.Rows.Count, outputEndCol)).ClearContents
+    Application.StatusBar = "データ読込中..."
+    parentData = wsCSV.Range(wsCSV.Cells(csvDataStartRow, 1), wsCSV.Cells(csvLastRow, csvLastCol)).Value2
+    masterData = wsMaster.Range(wsMaster.Cells(masterDataStartRow, 1), wsMaster.Cells(masterLastRow, masterLastCol)).Value2
 
-    ' DR列以降に子側見出しを出力（任意追加列も含める）
+    parentRows = UBound(parentData, 1)
+    masterRows = UBound(masterData, 1)
+
+    ReDim outData(1 To parentRows, 1 To masterLastCol)
+    ReDim masterNormFolder(1 To masterRows)
+    ReDim masterNormGuide2(1 To masterRows)
+    ReDim masterMeaningful(1 To masterRows)
+    ReDim matchedMasterRows(1 To masterRows)
+    ReDim matchedChildIndex(1 To parentRows)
+    ReDim matchedScore(1 To parentRows)
+    ReDim retentionDiffFlags(1 To parentRows)
+
+    Application.StatusBar = "子側データの正規化を準備中..."
+    For mIdx = 1 To masterRows
+        masterMeaningful(mIdx) = Not (Trim$(CStr(masterData(mIdx, colFolder))) = "" And Trim$(CStr(masterData(mIdx, colGuide2))) = "")
+        If masterMeaningful(mIdx) Then
+            masterNormFolder(mIdx) = NormalizeText(CStr(masterData(mIdx, colFolder)))
+            masterNormGuide2(mIdx) = NormalizeText(CStr(masterData(mIdx, colGuide2)))
+        End If
+        If (mIdx Mod 300) = 0 Then DoEvents
+    Next mIdx
+
+    wsCSV.Range(wsCSV.Cells(csvHeaderRow, outputStartCol), wsCSV.Cells(wsCSV.Rows.Count, outputEndCol)).ClearContents
     For c = 1 To masterLastCol
         wsCSV.Cells(csvHeaderRow, outputStartCol + c - 1).Value = GetSafeHeaderName(wsMaster.Cells(masterHeaderRow, c).Value, c)
     Next c
-
-    ' DR列以降の見出しから子側「保存期間」列を特定
     colOutputMasterRetention = FindHeaderColumnInRange(wsCSV, csvHeaderRow, "保存期間", outputStartCol, outputEndCol)
     ValidateHeaderColumn colOutputMasterRetention, "DR列以降の展開データで見出し「保存期間」が見つかりません。", 1008
 
-    ' 再実行時の色残りを防ぐ（対象セル列のみ初期化）
     ClearDiffHighlight wsCSV, csvDataStartRow, csvLastRow, colCsvRetention
     ClearDiffHighlight wsCSV, csvDataStartRow, csvLastRow, colCsvMediaType
     ClearDiffHighlight wsCSV, csvDataStartRow, csvLastRow, colOutputMasterRetention
 
-    '========================
-    ' 未突合シート（2枚）作成
-    '========================
     DeleteSheetIfExists wbCSV, "未突合"
     DeleteSheetIfExists wbCSV, "未突合_親側"
     DeleteSheetIfExists wbCSV, "未突合_子側"
 
     Set wsUnmatchedParent = wbCSV.Worksheets.Add(After:=wbCSV.Worksheets(wbCSV.Worksheets.Count))
     wsUnmatchedParent.Name = "未突合_親側"
-
     Set wsUnmatchedChild = wbCSV.Worksheets.Add(After:=wbCSV.Worksheets(wbCSV.Worksheets.Count))
     wsUnmatchedChild.Name = "未突合_子側"
-
     BuildParentUnmatchedHeader wsUnmatchedParent, wsCSV, csvHeaderRow, csvLastCol
     BuildChildUnmatchedHeader wsUnmatchedChild, wsMaster, masterHeaderRow, masterLastCol
 
-    unmatchParentRow = 2
-    unmatchChildRow = 2
+    Application.StatusBar = "突合処理中... 0 / " & parentRows
+    For rIdx = 1 To parentRows
+        titleVal = CStr(parentData(rIdx, colTitle))
+        class3Val = CStr(parentData(rIdx, colClass3))
+        nTitle = NormalizeText(titleVal)
+        nClass3 = NormalizeText(class3Val)
 
-    ReDim matchedMasterRows(masterDataStartRow To masterLastRow)
-
-    '========================
-    ' 突合実行（親側を基準に1行ずつ）
-    '========================
-    For r = csvDataStartRow To csvLastRow
-
-        titleVal = CStr(wsCSV.Cells(r, colTitle).Value)
-        class3Val = CStr(wsCSV.Cells(r, colClass3).Value)
-
-        bestRow = 0
         bestScore = 0
+        bestChildIndex = 0
 
-        Dim mr As Long
-        Dim masterFolder As String
-        Dim masterGuide2 As String
-
-        For mr = masterDataStartRow To masterLastRow
-
-            ' キーが空の行は判定対象から除外
-            If IsMeaningfulMasterRow(wsMaster, mr, colFolder, colGuide2) Then
-                masterFolder = CStr(wsMaster.Cells(mr, colFolder).Value)
-                masterGuide2 = CStr(wsMaster.Cells(mr, colGuide2).Value)
-
-                currentScore = MatchScore(titleVal, class3Val, masterFolder, masterGuide2)
-
-                If currentScore > bestScore Then
-                    bestScore = currentScore
-                    bestRow = mr
+        If nTitle <> "" And nClass3 <> "" Then
+            For mIdx = 1 To masterRows
+                If masterMeaningful(mIdx) Then
+                    currentScore = MatchScoreNormalized(nTitle, nClass3, masterNormFolder(mIdx), masterNormGuide2(mIdx))
+                    If currentScore > bestScore Then
+                        bestScore = currentScore
+                        bestChildIndex = mIdx
+                        If bestScore >= 100 Then Exit For
+                    End If
                 End If
+            Next mIdx
+        End If
 
-                If bestScore >= 100 Then Exit For
-            End If
-        Next mr
+        matchedScore(rIdx) = bestScore
+        matchedChildIndex(rIdx) = bestChildIndex
 
-        If bestRow > 0 And bestScore >= MATCH_THRESHOLD Then
-            ' 一致した場合：子側該当行を全列横展開
+        If bestChildIndex > 0 And bestScore >= MATCH_THRESHOLD Then
             For c = 1 To masterLastCol
-                wsCSV.Cells(r, outputStartCol + c - 1).Value = wsMaster.Cells(bestRow, c).Value
+                outData(rIdx, c) = masterData(bestChildIndex, c)
             Next c
+            matchedMasterRows(bestChildIndex) = True
 
-            ' 一致に使われた子側行を記録（後で未突合_子側作成に使用）
-            matchedMasterRows(bestRow) = True
-
-            ' 保存期間差異チェック（保存期間のみ）
-            ApplyRetentionDiffHighlight wsCSV, wsMaster, r, bestRow, _
-                                        colCsvRetention, colMasterRetention, colOutputMasterRetention, _
-                                        COLOR_RETENTION_DIFF
-        Else
-            ' 未一致の親側行を「未突合_親側」へ出力
-            OutputParentUnmatchedRow wsUnmatchedParent, wsCSV, r, csvLastCol, _
-                                     GetUnmatchedReason(titleVal, class3Val, bestScore), unmatchParentRow
-            unmatchParentRow = unmatchParentRow + 1
+            csvRetentionRaw = CStr(parentData(rIdx, colCsvRetention))
+            masterRetentionRaw = CStr(masterData(bestChildIndex, colMasterRetention))
+            masterContinueRaw = CStr(masterData(bestChildIndex, colMasterContinue))
+            retentionDiffFlags(rIdx) = IsRetentionDiff(csvRetentionRaw, masterRetentionRaw, masterContinueRaw)
         End If
 
-    Next r
+        If (rIdx Mod 100) = 0 Then
+            Application.StatusBar = "突合処理中... " & rIdx & " / " & parentRows
+            DoEvents
+        End If
+    Next rIdx
 
-    '========================
-    ' 子側未突合の出力（1度も一致に使われていない行）
-    '========================
-    For r = masterDataStartRow To masterLastRow
-        If IsMeaningfulMasterRow(wsMaster, r, colFolder, colGuide2) Then
-            If Not matchedMasterRows(r) Then
-                OutputChildUnmatchedRow wsUnmatchedChild, wsMaster, r, masterLastCol, unmatchChildRow
-                unmatchChildRow = unmatchChildRow + 1
+    Application.StatusBar = "突合結果を書き戻し中..."
+    wsCSV.Range(wsCSV.Cells(csvDataStartRow, outputStartCol), wsCSV.Cells(csvLastRow, outputEndCol)).Value2 = outData
+
+    For rIdx = 1 To parentRows
+        If retentionDiffFlags(rIdx) Then
+            wsCSV.Cells(csvDataStartRow + rIdx - 1, colCsvRetention).Interior.Color = COLOR_RETENTION_DIFF
+            wsCSV.Cells(csvDataStartRow + rIdx - 1, colOutputMasterRetention).Interior.Color = COLOR_RETENTION_DIFF
+        End If
+    Next rIdx
+
+    unmatchedParentCount = 0
+    For rIdx = 1 To parentRows
+        If Not (matchedChildIndex(rIdx) > 0 And matchedScore(rIdx) >= MATCH_THRESHOLD) Then
+            unmatchedParentCount = unmatchedParentCount + 1
+        End If
+    Next rIdx
+
+    If unmatchedParentCount > 0 Then
+        ReDim unmatchedParentData(1 To unmatchedParentCount, 1 To csvLastCol + 1)
+        Dim up As Long
+        up = 0
+        For rIdx = 1 To parentRows
+            If Not (matchedChildIndex(rIdx) > 0 And matchedScore(rIdx) >= MATCH_THRESHOLD) Then
+                up = up + 1
+                For c = 1 To csvLastCol
+                    unmatchedParentData(up, c) = parentData(rIdx, c)
+                Next c
+                rowReason = GetUnmatchedReason(CStr(parentData(rIdx, colTitle)), CStr(parentData(rIdx, colClass3)), matchedScore(rIdx))
+                unmatchedParentData(up, csvLastCol + 1) = rowReason
             End If
-        End If
-    Next r
+            If (rIdx Mod 300) = 0 Then DoEvents
+        Next rIdx
+        wsUnmatchedParent.Range(wsUnmatchedParent.Cells(2, 1), wsUnmatchedParent.Cells(1 + unmatchedParentCount, csvLastCol + 1)).Value2 = unmatchedParentData
+    End If
 
-    '========================
-    ' 媒体種別チェック（A. 一括チェック）
-    '========================
+    unmatchedChildCount = 0
+    For mIdx = 1 To masterRows
+        If masterMeaningful(mIdx) And Not matchedMasterRows(mIdx) Then
+            unmatchedChildCount = unmatchedChildCount + 1
+        End If
+    Next mIdx
+
+    If unmatchedChildCount > 0 Then
+        ReDim unmatchedChildData(1 To unmatchedChildCount, 1 To masterLastCol)
+        Dim uc As Long
+        uc = 0
+        For mIdx = 1 To masterRows
+            If masterMeaningful(mIdx) And Not matchedMasterRows(mIdx) Then
+                uc = uc + 1
+                For c = 1 To masterLastCol
+                    unmatchedChildData(uc, c) = masterData(mIdx, c)
+                Next c
+            End If
+            If (mIdx Mod 300) = 0 Then DoEvents
+        Next mIdx
+        wsUnmatchedChild.Range(wsUnmatchedChild.Cells(2, 1), wsUnmatchedChild.Cells(1 + unmatchedChildCount, masterLastCol)).Value2 = unmatchedChildData
+    End If
+
+    Application.StatusBar = "媒体種別チェック中..."
     ApplyMediaTypeHighlightToAllRows wsCSV, csvHeaderRow, csvDataStartRow, csvLastRow, COLOR_MEDIA_NOT_ELECTRONIC
 
-    '========================
-    ' 列の表示制御（見出し名ベース）
-    '========================
+    Application.StatusBar = "列表示調整中..."
     ApplyColumnVisibility wsCSV, csvHeaderRow, outputStartCol, outputEndCol
-
-    wsCSV.Columns(outputStartCol).Resize(, masterLastCol).EntireColumn.AutoFit
-    wsUnmatchedParent.Columns.AutoFit
-    wsUnmatchedChild.Columns.AutoFit
+    ApplyUnmatchedParentColumnVisibility wsUnmatchedParent, 1
+    ApplyUnmatchedChildColumnVisibility wsUnmatchedChild, 1
 
     msg = "突合処理が完了しました。" & vbCrLf & _
           "基準表の見出し行: " & masterHeaderRow & "行目（自動判定）" & vbCrLf & _
           "一致データは DR列以降へ出力しました。" & vbCrLf & _
-          "未突合_親側件数：" & (unmatchParentRow - 2) & "件" & vbCrLf & _
-          "未突合_子側件数：" & (unmatchChildRow - 2) & "件"
+          "未突合_親側件数：" & unmatchedParentCount & "件" & vbCrLf & _
+          "未突合_子側件数：" & unmatchedChildCount & "件"
 
     MsgBox msg, vbInformation
 
 ExitProc:
     On Error Resume Next
     If Not wbMaster Is Nothing Then wbMaster.Close SaveChanges:=False
-
+    Application.StatusBar = False
     Application.DisplayAlerts = True
     Application.ScreenUpdating = True
     Application.EnableEvents = True
@@ -582,6 +620,7 @@ Private Sub ApplyRetentionDiffHighlight(ByVal wsCSV As Worksheet, _
                                         ByVal masterRow As Long, _
                                         ByVal colCsvRetention As Long, _
                                         ByVal colMasterRetention As Long, _
+                                        ByVal colMasterContinue As Long, _
                                         ByVal colOutputMasterRetention As Long, _
                                         ByVal retentionColor As Long)
 
@@ -589,6 +628,7 @@ Private Sub ApplyRetentionDiffHighlight(ByVal wsCSV As Worksheet, _
     Dim masterRetentionRaw As String
     Dim csvRetentionNorm As String
     Dim masterRetentionNorm As String
+    Dim masterContinueNorm As String
 
     csvRetentionRaw = Trim$(CStr(wsCSV.Cells(csvRow, colCsvRetention).Value))
     masterRetentionRaw = Trim$(CStr(wsMaster.Cells(masterRow, colMasterRetention).Value))
@@ -598,6 +638,11 @@ Private Sub ApplyRetentionDiffHighlight(ByVal wsCSV As Worksheet, _
 
     csvRetentionNorm = NormalizeRetentionPeriod(csvRetentionRaw)
     masterRetentionNorm = NormalizeRetentionPeriod(masterRetentionRaw)
+    masterContinueNorm = NormalizeContinueFlag(CStr(wsMaster.Cells(masterRow, colMasterContinue).Value))
+
+    ' 例外仕様:
+    ' 親保存期間=継続 かつ 子継続=継 の場合は、保存期間差異の黄色塗りなし
+    If csvRetentionNorm = "継続" And masterContinueNorm = "継" Then Exit Sub
 
     If csvRetentionNorm <> masterRetentionNorm Then
         wsCSV.Cells(csvRow, colCsvRetention).Interior.Color = retentionColor
@@ -605,6 +650,25 @@ Private Sub ApplyRetentionDiffHighlight(ByVal wsCSV As Worksheet, _
     End If
 
 End Sub
+
+Private Function NormalizeContinueFlag(ByVal continueText As String) As String
+
+    Dim t As String
+    t = Trim$(CStr(continueText))
+
+    On Error Resume Next
+    t = StrConv(t, vbNarrow)
+    On Error GoTo 0
+
+    t = LCase$(Replace(Replace(t, " ", ""), "　", ""))
+
+    If t = "継" Or t = "けい" Then
+        NormalizeContinueFlag = "継"
+    Else
+        NormalizeContinueFlag = t
+    End If
+
+End Function
 
 Private Function NormalizeRetentionPeriod(ByVal retentionText As String) As String
 
@@ -680,7 +744,7 @@ Private Sub ApplyColumnVisibility(ByVal ws As Worksheet, _
     Dim headerName As String
 
     keepParent = Array("年度（和暦）", "原課", "タイトル", "保存期間", "分類名１", "分類名２", "分類名３", "媒体種別", "公開用タイトル", "廃棄予定年（和暦）", "作成年度（和暦）")
-    keepChild = Array("通し番号", "指定", "毎年", "1", "一時借出", "第１ガイド", "１色", "第２ガイド", "２色", "継続", "年度", "個別フォルダー", "内容・取扱説明", "保存期間", "媒体", "備考")
+    keepChild = Array("通し番号", "第１ガイド", "１色", "第２ガイド", "２色", "継続", "年度", "個別フォルダー", "移替", "内容・取扱説明", "保存期間", "媒体", "備考")
 
     lastTargetCol = ws.Cells(headerRow, ws.Columns.Count).End(xlToLeft).Column
     If outputEndCol > lastTargetCol Then lastTargetCol = outputEndCol
@@ -693,6 +757,41 @@ Private Sub ApplyColumnVisibility(ByVal ws As Worksheet, _
         ElseIf c <= outputEndCol Then
             ws.Columns(c).Hidden = Not IsInArray(headerName, keepChild)
         End If
+    Next c
+
+End Sub
+
+Private Sub ApplyUnmatchedParentColumnVisibility(ByVal ws As Worksheet, ByVal headerRow As Long)
+
+    Dim keepHeaders As Variant
+    keepHeaders = Array("年度（和暦）", "タイトル", "保存期間", "分類名２", "分類名３", "媒体種別", "未突合理由")
+
+    ApplySheetColumnVisibilityByHeaders ws, headerRow, keepHeaders
+
+End Sub
+
+Private Sub ApplyUnmatchedChildColumnVisibility(ByVal ws As Worksheet, ByVal headerRow As Long)
+
+    Dim keepHeaders As Variant
+    keepHeaders = Array("通し番号", "第１ガイド", "１色", "第２ガイド", "２色", "継続", "年度", "個別フォルダー", "内容・取扱説明", "保存期間", "媒体")
+
+    ApplySheetColumnVisibilityByHeaders ws, headerRow, keepHeaders
+
+End Sub
+
+Private Sub ApplySheetColumnVisibilityByHeaders(ByVal ws As Worksheet, _
+                                                ByVal headerRow As Long, _
+                                                ByVal keepHeaders As Variant)
+
+    Dim lastCol As Long
+    Dim c As Long
+    Dim headerName As String
+
+    lastCol = ws.Cells(headerRow, ws.Columns.Count).End(xlToLeft).Column
+
+    For c = 1 To lastCol
+        headerName = Trim$(CStr(ws.Cells(headerRow, c).Value))
+        ws.Columns(c).Hidden = Not IsInArray(headerName, keepHeaders)
     Next c
 
 End Sub
@@ -766,6 +865,75 @@ Private Function MatchScore(ByVal csvTitle As String, _
 
 End Function
 
+Private Function MatchScoreNormalized(ByVal nCsvTitle As String, _
+                                      ByVal nCsvClass3 As String, _
+                                      ByVal nMasterFolder As String, _
+                                      ByVal nMasterGuide2 As String) As Long
+
+    If nCsvTitle = "" Or nCsvClass3 = "" Or nMasterFolder = "" Or nMasterGuide2 = "" Then
+        MatchScoreNormalized = 0
+        Exit Function
+    End If
+
+    If nCsvTitle = nMasterFolder And nCsvClass3 = nMasterGuide2 Then
+        MatchScoreNormalized = 100
+        Exit Function
+    End If
+
+    If nCsvClass3 = nMasterGuide2 Then
+        If InStr(1, nCsvTitle, nMasterFolder, vbTextCompare) > 0 _
+           Or InStr(1, nMasterFolder, nCsvTitle, vbTextCompare) > 0 Then
+            MatchScoreNormalized = 80
+            Exit Function
+        End If
+    End If
+
+    If nCsvTitle = nMasterFolder Then
+        If InStr(1, nCsvClass3, nMasterGuide2, vbTextCompare) > 0 _
+           Or InStr(1, nMasterGuide2, nCsvClass3, vbTextCompare) > 0 Then
+            MatchScoreNormalized = 75
+            Exit Function
+        End If
+    End If
+
+    If (InStr(1, nCsvTitle, nMasterFolder, vbTextCompare) > 0 _
+        Or InStr(1, nMasterFolder, nCsvTitle, vbTextCompare) > 0) _
+       And _
+       (InStr(1, nCsvClass3, nMasterGuide2, vbTextCompare) > 0 _
+        Or InStr(1, nMasterGuide2, nCsvClass3, vbTextCompare) > 0) Then
+        MatchScoreNormalized = 60
+        Exit Function
+    End If
+
+    MatchScoreNormalized = 0
+
+End Function
+
+Private Function IsRetentionDiff(ByVal csvRetentionRaw As String, _
+                                 ByVal masterRetentionRaw As String, _
+                                 ByVal masterContinueRaw As String) As Boolean
+
+    Dim csvRetentionNorm As String
+    Dim masterRetentionNorm As String
+    Dim masterContinueNorm As String
+
+    If Trim$(csvRetentionRaw) = "" And Trim$(masterRetentionRaw) = "" Then
+        IsRetentionDiff = False
+        Exit Function
+    End If
+
+    csvRetentionNorm = NormalizeRetentionPeriod(csvRetentionRaw)
+    masterRetentionNorm = NormalizeRetentionPeriod(masterRetentionRaw)
+    masterContinueNorm = NormalizeContinueFlag(masterContinueRaw)
+
+    If csvRetentionNorm = "継続" And masterContinueNorm = "継" Then
+        IsRetentionDiff = False
+    Else
+        IsRetentionDiff = (csvRetentionNorm <> masterRetentionNorm)
+    End If
+
+End Function
+
 Private Function NormalizeText(ByVal s As String) As String
 
     Dim t As String
@@ -800,26 +968,33 @@ Private Function NormalizeText(ByVal s As String) As String
     t = Replace(t, ChrW(&HA0), "")   ' ノーブレークスペース
 
     '---------------------------------------
-    ' 5) 先に表記統一したい記号を統一
+    ' 5) 業務上の語句ゆれを先に統一
+    '---------------------------------------
+    t = NormalizeBusinessTerms(t)
+    t = NormalizeJapaneseEraRange(t)
+
+    '---------------------------------------
+    ' 6) 先に表記統一したい記号を統一
     '---------------------------------------
     ' 波ダッシュ系
     t = Replace(t, "～", "~")
-    t = Replace(t, "?", "~")
-    t = Replace(t, "?", "~")
-    t = Replace(t, "?", "~")
-    t = Replace(t, "?", "-")
+    t = Replace(t, ChrW(&H301C), "~") ' 〜
+    t = Replace(t, ChrW(&HFF5E), "~") ' ～
+    t = Replace(t, ChrW(&H223C), "~") ' ∼
+    t = Replace(t, ChrW(&H2053), "~") ' ⁓
 
     ' ハイフン・長音・ダッシュ系
     t = Replace(t, "‐", "-")
-    t = Replace(t, "-", "-")
-    t = Replace(t, "?", "-")
-    t = Replace(t, "?", "-")
-    t = Replace(t, "?", "-")
+    t = Replace(t, ChrW(&H2010), "-") ' ‐
+    t = Replace(t, ChrW(&H2011), "-") ' ‑
+    t = Replace(t, ChrW(&H2012), "-") ' ‒
+    t = Replace(t, ChrW(&H2013), "-") ' –
+    t = Replace(t, ChrW(&H2014), "-") ' —
     t = Replace(t, "―", "-")
     t = Replace(t, "－", "-")
     t = Replace(t, "ｰ", "-")
     t = Replace(t, "ー", "-")
-    t = Replace(t, "?", "-")
+    t = Replace(t, ChrW(&H2212), "-") ' −
 
     ' ピリオド・中黒類
     t = Replace(t, "．", ".")
@@ -829,9 +1004,9 @@ Private Function NormalizeText(ByVal s As String) As String
 
     ' スラッシュ類
     t = Replace(t, "／", "/")
-    t = Replace(t, "?", "/")
-    t = Replace(t, "?", "/")
-    t = Replace(t, "?", "/")
+    t = Replace(t, ChrW(&HFF0F), "/") ' ／
+    t = Replace(t, ChrW(&H2044), "/") ' ⁄
+    t = Replace(t, ChrW(&H2215), "/") ' ∕
 
     ' バックスラッシュ類
     t = Replace(t, "￥", "\")
@@ -861,7 +1036,7 @@ Private Function NormalizeText(ByVal s As String) As String
     t = Replace(t, "』", """")
 
     '---------------------------------------
-    ' 6) 突合上ノイズになりやすい記号を除去
+    ' 7) 突合上ノイズになりやすい記号を除去
     '---------------------------------------
     t = Replace(t, "-", "")
     t = Replace(t, "~", "")
@@ -905,6 +1080,92 @@ Private Function NormalizeText(ByVal s As String) As String
 
 End Function
 
+Private Function NormalizeBusinessTerms(ByVal textValue As String) As String
+
+    Dim t As String
+    t = textValue
+
+    ' 「外N件」→「他N件」を限定的に吸収（副作用を避けるため件数付きのみ）
+    t = Replace(t, "外1件", "他1件")
+    t = Replace(t, "外2件", "他2件")
+    t = Replace(t, "外3件", "他3件")
+    t = Replace(t, "外4件", "他4件")
+    t = Replace(t, "外5件", "他5件")
+    t = Replace(t, "外6件", "他6件")
+    t = Replace(t, "外7件", "他7件")
+    t = Replace(t, "外8件", "他8件")
+    t = Replace(t, "外9件", "他9件")
+
+    NormalizeBusinessTerms = t
+
+End Function
+
+Private Function NormalizeJapaneseEraRange(ByVal textValue As String) As String
+
+    Dim t As String
+    t = textValue
+
+    ' 先にレンジ記号を統一（この段階では除去しない）
+    t = Replace(t, "～", "~")
+    t = Replace(t, ChrW(&H301C), "~") ' 〜
+    t = Replace(t, ChrW(&HFF5E), "~") ' ～
+    t = Replace(t, "〜", "~")
+
+    ' 例) R7~8 / r7~8 / R7～8 を R7~R8 へ
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = True
+    re.Pattern = "([rＲ]\s*[0-9０-９]{1,2})\s*~\s*([0-9０-９]{1,2})"
+
+    Dim matches As Object
+    Set matches = re.Execute(t)
+
+    Dim i As Long
+    Dim m As Object
+    Dim firstYear As String
+    Dim secondYear As String
+    Dim replacement As String
+
+    For i = matches.Count - 1 To 0 Step -1
+        Set m = matches.Item(i)
+        firstYear = NormalizeDigitsOnly(m.SubMatches(0))
+        secondYear = NormalizeDigitsOnly(m.SubMatches(1))
+
+        If firstYear <> "" And secondYear <> "" Then
+            replacement = "r" & firstYear & "~r" & secondYear
+            t = Left$(t, m.FirstIndex) & replacement & Mid$(t, m.FirstIndex + m.Length + 1)
+        End If
+    Next i
+
+    NormalizeJapaneseEraRange = t
+
+End Function
+
+Private Function NormalizeDigitsOnly(ByVal textValue As String) As String
+
+    Dim t As String
+    Dim i As Long
+    Dim ch As String
+    Dim resultText As String
+
+    t = textValue
+
+    On Error Resume Next
+    t = StrConv(t, vbNarrow)
+    On Error GoTo 0
+
+    For i = 1 To Len(t)
+        ch = Mid$(t, i, 1)
+        If ch Like "[0-9]" Then
+            resultText = resultText & ch
+        End If
+    Next i
+
+    NormalizeDigitsOnly = resultText
+
+End Function
+
 Private Function GetWorksheetIfExists(ByVal wb As Workbook, ByVal sheetName As String) As Worksheet
 
     On Error Resume Next
@@ -924,4 +1185,3 @@ Private Sub DeleteSheetIfExists(ByVal wb As Workbook, ByVal sheetName As String)
     If Not ws Is Nothing Then ws.Delete
 
 End Sub
-
