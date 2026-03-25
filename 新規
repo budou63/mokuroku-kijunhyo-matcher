@@ -35,6 +35,7 @@ Public Sub 文書管理システム_基準表突合()
     Dim colFolder As Long
     Dim colGuide2 As Long
     Dim colMasterRetention As Long
+    Dim colMasterContinue As Long
     Dim colOutputMasterRetention As Long
 
     Dim r As Long, c As Long
@@ -144,10 +145,12 @@ Public Sub 文書管理システム_基準表突合()
     colFolder = FindHeaderColumn(wsMaster, masterHeaderRow, "個別フォルダー")
     colGuide2 = FindHeaderColumn(wsMaster, masterHeaderRow, "第２ガイド")
     colMasterRetention = FindHeaderColumn(wsMaster, masterHeaderRow, "保存期間")
+    colMasterContinue = FindHeaderColumn(wsMaster, masterHeaderRow, "継続")
 
     ValidateHeaderColumn colFolder, "基準表で見出し「個別フォルダー」が見つかりません。", 1003
     ValidateHeaderColumn colGuide2, "基準表で見出し「第２ガイド」が見つかりません。", 1004
     ValidateHeaderColumn colMasterRetention, "基準表で見出し「保存期間」が見つかりません。", 1007
+    ValidateHeaderColumn colMasterContinue, "基準表で見出し「継続」が見つかりません。", 1009
 
     masterLastCol = wsMaster.Cells(masterHeaderRow, wsMaster.Columns.Count).End(xlToLeft).Column
     masterLastRow = GetMasterLastRow(wsMaster, colFolder, colGuide2)
@@ -242,7 +245,7 @@ Public Sub 文書管理システム_基準表突合()
 
             ' 保存期間差異チェック（保存期間のみ）
             ApplyRetentionDiffHighlight wsCSV, wsMaster, r, bestRow, _
-                                        colCsvRetention, colMasterRetention, colOutputMasterRetention, _
+                                        colCsvRetention, colMasterRetention, colMasterContinue, colOutputMasterRetention, _
                                         COLOR_RETENTION_DIFF
         Else
             ' 未一致の親側行を「未突合_親側」へ出力
@@ -274,6 +277,8 @@ Public Sub 文書管理システム_基準表突合()
     ' 列の表示制御（見出し名ベース）
     '========================
     ApplyColumnVisibility wsCSV, csvHeaderRow, outputStartCol, outputEndCol
+    ApplyUnmatchedParentColumnVisibility wsUnmatchedParent, 1
+    ApplyUnmatchedChildColumnVisibility wsUnmatchedChild, 1
 
     wsCSV.Columns(outputStartCol).Resize(, masterLastCol).EntireColumn.AutoFit
     wsUnmatchedParent.Columns.AutoFit
@@ -582,6 +587,7 @@ Private Sub ApplyRetentionDiffHighlight(ByVal wsCSV As Worksheet, _
                                         ByVal masterRow As Long, _
                                         ByVal colCsvRetention As Long, _
                                         ByVal colMasterRetention As Long, _
+                                        ByVal colMasterContinue As Long, _
                                         ByVal colOutputMasterRetention As Long, _
                                         ByVal retentionColor As Long)
 
@@ -589,6 +595,7 @@ Private Sub ApplyRetentionDiffHighlight(ByVal wsCSV As Worksheet, _
     Dim masterRetentionRaw As String
     Dim csvRetentionNorm As String
     Dim masterRetentionNorm As String
+    Dim masterContinueNorm As String
 
     csvRetentionRaw = Trim$(CStr(wsCSV.Cells(csvRow, colCsvRetention).Value))
     masterRetentionRaw = Trim$(CStr(wsMaster.Cells(masterRow, colMasterRetention).Value))
@@ -598,6 +605,11 @@ Private Sub ApplyRetentionDiffHighlight(ByVal wsCSV As Worksheet, _
 
     csvRetentionNorm = NormalizeRetentionPeriod(csvRetentionRaw)
     masterRetentionNorm = NormalizeRetentionPeriod(masterRetentionRaw)
+    masterContinueNorm = NormalizeContinueFlag(CStr(wsMaster.Cells(masterRow, colMasterContinue).Value))
+
+    ' 例外仕様:
+    ' 親保存期間=継続 かつ 子継続=継 の場合は、保存期間差異の黄色塗りなし
+    If csvRetentionNorm = "継続" And masterContinueNorm = "継" Then Exit Sub
 
     If csvRetentionNorm <> masterRetentionNorm Then
         wsCSV.Cells(csvRow, colCsvRetention).Interior.Color = retentionColor
@@ -605,6 +617,25 @@ Private Sub ApplyRetentionDiffHighlight(ByVal wsCSV As Worksheet, _
     End If
 
 End Sub
+
+Private Function NormalizeContinueFlag(ByVal continueText As String) As String
+
+    Dim t As String
+    t = Trim$(CStr(continueText))
+
+    On Error Resume Next
+    t = StrConv(t, vbNarrow)
+    On Error GoTo 0
+
+    t = LCase$(Replace(Replace(t, " ", ""), "　", ""))
+
+    If t = "継" Or t = "けい" Then
+        NormalizeContinueFlag = "継"
+    Else
+        NormalizeContinueFlag = t
+    End If
+
+End Function
 
 Private Function NormalizeRetentionPeriod(ByVal retentionText As String) As String
 
@@ -680,7 +711,7 @@ Private Sub ApplyColumnVisibility(ByVal ws As Worksheet, _
     Dim headerName As String
 
     keepParent = Array("年度（和暦）", "原課", "タイトル", "保存期間", "分類名１", "分類名２", "分類名３", "媒体種別", "公開用タイトル", "廃棄予定年（和暦）", "作成年度（和暦）")
-    keepChild = Array("通し番号", "指定", "毎年", "1", "一時借出", "第１ガイド", "１色", "第２ガイド", "２色", "継続", "年度", "個別フォルダー", "内容・取扱説明", "保存期間", "媒体", "備考")
+    keepChild = Array("通し番号", "第１ガイド", "１色", "第２ガイド", "２色", "継続", "年度", "個別フォルダー", "移替", "内容・取扱説明", "保存期間", "媒体", "備考")
 
     lastTargetCol = ws.Cells(headerRow, ws.Columns.Count).End(xlToLeft).Column
     If outputEndCol > lastTargetCol Then lastTargetCol = outputEndCol
@@ -693,6 +724,41 @@ Private Sub ApplyColumnVisibility(ByVal ws As Worksheet, _
         ElseIf c <= outputEndCol Then
             ws.Columns(c).Hidden = Not IsInArray(headerName, keepChild)
         End If
+    Next c
+
+End Sub
+
+Private Sub ApplyUnmatchedParentColumnVisibility(ByVal ws As Worksheet, ByVal headerRow As Long)
+
+    Dim keepHeaders As Variant
+    keepHeaders = Array("年度（和暦）", "タイトル", "保存期間", "分類名２", "分類名３", "媒体種別", "未突合理由")
+
+    ApplySheetColumnVisibilityByHeaders ws, headerRow, keepHeaders
+
+End Sub
+
+Private Sub ApplyUnmatchedChildColumnVisibility(ByVal ws As Worksheet, ByVal headerRow As Long)
+
+    Dim keepHeaders As Variant
+    keepHeaders = Array("通し番号", "第１ガイド", "１色", "第２ガイド", "２色", "継続", "年度", "個別フォルダー", "内容・取扱説明", "保存期間", "媒体")
+
+    ApplySheetColumnVisibilityByHeaders ws, headerRow, keepHeaders
+
+End Sub
+
+Private Sub ApplySheetColumnVisibilityByHeaders(ByVal ws As Worksheet, _
+                                                ByVal headerRow As Long, _
+                                                ByVal keepHeaders As Variant)
+
+    Dim lastCol As Long
+    Dim c As Long
+    Dim headerName As String
+
+    lastCol = ws.Cells(headerRow, ws.Columns.Count).End(xlToLeft).Column
+
+    For c = 1 To lastCol
+        headerName = Trim$(CStr(ws.Cells(headerRow, c).Value))
+        ws.Columns(c).Hidden = Not IsInArray(headerName, keepHeaders)
     Next c
 
 End Sub
